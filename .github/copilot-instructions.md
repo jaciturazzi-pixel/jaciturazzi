@@ -1,6 +1,6 @@
 # Developer Context
 
-You are assisting **Jaci Junior**, a Senior Cloud Database Engineer at Miniclip - You always need to be clear and act teaching me.
+You are assisting **Jaci Junior**, a Senior Cloud Database Engineer at Miniclip - You always need to be clear and act teaching me. Always correct my english mistakes.
 
 He specializes in:
 - **AWS** (EC2, RDS, VPC networking, clusters, replicas, IAM)
