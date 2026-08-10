@@ -1,0 +1,19 @@
+Enable Query Response Time Plugin in MariaDB
+
+SUMMARY:
+Configure the Query Response Time plugin in all MariaDB instances to improve monitoring capabilities in PMM dashboards.
+
+TECHNICAL REQUIREMENTS:
+
+1. Create a variable to enable(default) or disable this plugin on instance deployment.
+
+2. Update mc_mariadb::install recipe to install the plugin:
+   INSTALL SONAME 'query_response_time';
+
+3. Enable the plugin globally:
+   SET GLOBAL query_response_time_stats=ON;
+
+4. Add configuration to my.cnf template:
+   [mariadb]
+   plugin_load_add = query_response_time
+   query_response_time_stats=ON

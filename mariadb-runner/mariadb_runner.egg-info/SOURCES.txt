@@ -1,0 +1,8 @@
+README.md
+mariadb_runner.py
+pyproject.toml
+mariadb_runner.egg-info/PKG-INFO
+mariadb_runner.egg-info/SOURCES.txt
+mariadb_runner.egg-info/dependency_links.txt
+mariadb_runner.egg-info/requires.txt
+mariadb_runner.egg-info/top_level.txt
