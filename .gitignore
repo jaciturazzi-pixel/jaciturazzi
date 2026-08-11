@@ -1,0 +1,9 @@
+# Python virtual environments
+venv/
+.venv*
+**/.venv*
+**/venv/
+
+# Generated exports
+*.csv
+*.log

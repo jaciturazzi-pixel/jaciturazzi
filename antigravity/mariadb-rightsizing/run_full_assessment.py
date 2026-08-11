@@ -7,7 +7,9 @@ import os
 import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_NOTES_DIR = "/Users/jaci.turazzi/Documents/Backup Macbook M1 IXC/Anotações/Projetos/RigthSizing"
+# Portable default: Uses user's specific path if present, otherwise defaults to ./reports/ in project folder
+PREFERRED_NOTES_DIR = os.path.expanduser("~/Documents/Backup Macbook M1 IXC/Anotações/Projetos/RigthSizing")
+DEFAULT_NOTES_DIR = PREFERRED_NOTES_DIR if os.path.exists(os.path.dirname(PREFERRED_NOTES_DIR)) else os.path.join(BASE_DIR, "reports")
 
 PRICES_EC2_HOURLY = {
     'r8i.16xlarge': 4.170,
@@ -70,7 +72,7 @@ def get_metric_stats(cloudwatch, namespace, metric_name, dimensions, start_time,
         )
         datapoints = resp.get('Datapoints', [])
         if not datapoints:
-            return {'max': 0.0, 'p95': 0.0, 'avg': 0.0}
+            return {'max': 0.0, 'p95': 0.0, 'avg': 0.0, 'success': True, 'has_data': False}
         
         max_val = max(dp.get('Maximum', 0.0) for dp in datapoints)
         avg_val = sum(dp.get('Average', 0.0) for dp in datapoints) / len(datapoints)
@@ -78,9 +80,10 @@ def get_metric_stats(cloudwatch, namespace, metric_name, dimensions, start_time,
         p95_vals.sort()
         p95_val = p95_vals[int(len(p95_vals)*0.95)] if p95_vals else 0.0
         
-        return {'max': max_val, 'p95': p95_val, 'avg': avg_val}
-    except Exception:
-        return {'max': 0.0, 'p95': 0.0, 'avg': 0.0}
+        return {'max': max_val, 'p95': p95_val, 'avg': avg_val, 'success': True, 'has_data': True}
+    except Exception as e:
+        print(f"  ⚠️ CloudWatch API Error fetching {metric_name}: {e}")
+        return {'max': 0.0, 'p95': 0.0, 'avg': 0.0, 'success': False, 'has_data': False}
 
 def get_ebs_io_stats(cloudwatch, volume_id, start_time, end_time, period=300):
     total_seconds = (end_time - start_time).total_seconds()
@@ -102,7 +105,7 @@ def get_ebs_io_stats(cloudwatch, volume_id, start_time, end_time, period=300):
         all_timestamps = set(dps_r.keys()).union(set(dps_w.keys()))
 
         if not all_timestamps:
-            return {'peak_iops': 0.0, 'p95_iops': 0.0, 'read_mb': 0.0, 'write_mb': 0.0}
+            return {'peak_iops': 0.0, 'p95_iops': 0.0, 'read_mb': 0.0, 'write_mb': 0.0, 'success': True}
 
         iops_series = []
         for ts in all_timestamps:
@@ -124,11 +127,12 @@ def get_ebs_io_stats(cloudwatch, volume_id, start_time, end_time, period=300):
             'peak_iops': round(peak_iops, 2),
             'p95_iops': round(p95_iops, 2),
             'read_mb': round(read_mb, 2),
-            'write_mb': round(write_mb, 2)
+            'write_mb': round(write_mb, 2),
+            'success': True
         }
     except Exception as e:
-        print(f"  ⚠️ CloudWatch EBS error for {volume_id}: {e}")
-        return {'peak_iops': 0.0, 'p95_iops': 0.0, 'read_mb': 0.0, 'write_mb': 0.0}
+        print(f"  ⚠️ CloudWatch EBS API error for {volume_id}: {e}")
+        return {'peak_iops': 0.0, 'p95_iops': 0.0, 'read_mb': 0.0, 'write_mb': 0.0, 'success': False}
 
 def safe_float(val, default=0.0):
     try:
@@ -143,6 +147,7 @@ def safe_int(val, default=0):
         return default
 
 def get_mariadb_metrics_via_ssm(ssm_client, instance_id):
+    """ Non-intrusive internal MariaDB metrics query via SSM with status polling loop """
     sql_cmd = """mysql -u root -s -N -e "SELECT CONCAT_WS(';', @@hostname, ROUND(@@innodb_buffer_pool_size/(1024*1024*1024),2), CAST((SELECT VARIABLE_VALUE FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VARIABLE_NAME='Innodb_buffer_pool_pages_data') AS UNSIGNED), CAST((SELECT VARIABLE_VALUE FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VARIABLE_NAME='Innodb_buffer_pool_pages_total') AS UNSIGNED), ROUND((SELECT VARIABLE_VALUE FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VARIABLE_NAME='Innodb_buffer_pool_pages_dirty')*@@innodb_page_size/(1024*1024*1024),2), ROUND((1-((SELECT VARIABLE_VALUE FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VARIABLE_NAME='Innodb_buffer_pool_reads')/NULLIF((SELECT VARIABLE_VALUE FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VARIABLE_NAME='Innodb_buffer_pool_read_requests'),0)))*100,3), CAST((SELECT VARIABLE_VALUE FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VARIABLE_NAME='Innodb_buffer_pool_wait_free') AS UNSIGNED), CAST((SELECT VARIABLE_VALUE FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VARIABLE_NAME='Threads_running') AS UNSIGNED), CAST((SELECT VARIABLE_VALUE FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VARIABLE_NAME='Threads_connected') AS UNSIGNED), CAST((SELECT VARIABLE_VALUE FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VARIABLE_NAME='Max_used_connections') AS UNSIGNED), CAST((SELECT VARIABLE_VALUE FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VARIABLE_NAME='Innodb_row_lock_waits') AS UNSIGNED), @@version);" """
     
     try:
@@ -152,10 +157,20 @@ def get_mariadb_metrics_via_ssm(ssm_client, instance_id):
             Parameters={'commands': [sql_cmd]}
         )
         command_id = resp['Command']['CommandId']
-        time.sleep(2.5)
         
-        invocation = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
-        out = invocation.get('StandardOutputContent', '').strip()
+        # Senior SRE Fix: Robust status polling loop instead of fixed sleep
+        max_attempts = 20
+        out = ""
+        for _ in range(max_attempts):
+            time.sleep(0.5)
+            invocation = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+            status = invocation.get('Status', '')
+            if status == 'Success':
+                out = invocation.get('StandardOutputContent', '').strip()
+                break
+            elif status in ['Failed', 'Cancelled', 'TimedOut']:
+                print(f"  ⚠️ SSM command {command_id} status for {instance_id}: {status}")
+                break
         
         if out and ';' in out:
             parts = out.split(';')
@@ -219,7 +234,7 @@ def print_senior_dba_dashboard(node_res):
     print(f"📌 Instance ID: {inst_id}  |  Current EC2 Type: {curr_type}")
     
     if node_res.get('status') == 'ERROR':
-        print(f"⚠️  NODE STATUS: COLLECTION ERROR ({node_res.get('error_msg', 'Instance Stopped or Invalid SSM State')})")
+        print(f"⚠️  NODE STATUS: COLLECTION ERROR ({node_res.get('error_msg', 'Instance Stopped or CloudWatch/SSM API Failure')})")
         print("═" * 95)
         return
 
@@ -256,14 +271,10 @@ def print_senior_dba_dashboard(node_res):
         print("   ⚠️ (Run with --use-ssm and an active instance to collect thread metrics)")
 
     print("\n📊 --- CPU PROCESSING & HEADROOM CAPACITY (HIGH RESOLUTION) ---")
-    print(f"   • Average CPU (30d):                {node_res.get('cpu_30d_avg', 0.0)}%")
-    print(f"   • P95 CPU (30d):                    {node_res.get('cpu_30d_p95', 0.0)}%")
-    print(f"   • 5-Min Peak CPU (3d):              {node_res.get('cpu_5min_peak_max', 0.0)}%  (Captures fast cron/routine spikes)")
-    print(f"   • 1-Hour Max CPU (30d):             {node_res.get('cpu_30d_max', 0.0)}%")
-    if node_res.get('cpu_peak_max', 0.0) > 0:
-        print(f"   • Year-End Peak CPU (2025):         {node_res['cpu_peak_max']}%  (Black Friday / Holiday Peak 2025)")
-    else:
-        print(f"   • Year-End Peak CPU (2025):         ℹ️  Instance launched in 2026 (No datapoints in 2025)")
+    print(f"   • Average CPU (Evaluated Window):   {node_res.get('cpu_30d_avg', 0.0)}%")
+    print(f"   • P95 CPU (Evaluated Window):       {node_res.get('cpu_30d_p95', 0.0)}%")
+    print(f"   • 5-Min Peak CPU (3d Fine):         {node_res.get('cpu_5min_peak_max', 0.0)}%  (Captures fast cron/routine spikes)")
+    print(f"   • Max CPU (Evaluated Window):       {node_res.get('cpu_30d_max', 0.0)}%")
 
     print(f"   • Absolute Max CPU Evaluated:       {node_res.get('highest_cpu_max', 0.0)}%")
     print(f"   • Projected Downsized Max CPU:      {node_res.get('projected_cpu_max', 0.0)}%  (Half vCPUs under worst peak)")
@@ -283,8 +294,7 @@ def print_senior_dba_dashboard(node_res):
 
         print(f"   • Data Volume `{v_id}` (Device: {dev_name} | Type: {v_type} {v_size} GB):")
         print(f"     - Provisioned IOPS:   {prov_iops} IOPS")
-        print(f"     - 30d Peak Used IOPS: {vol.get('peak_used_iops_30d', peak_iops)} IOPS (P95: {p95_iops} IOPS)")
-        print(f"     - Year-End Peak IOPS: {peak_iops} IOPS")
+        print(f"     - Peak Used IOPS:     {peak_iops} IOPS (P95: {p95_iops} IOPS)")
         print(f"     - Peak Throughput:    {read_mb:.2f} MB/s Read | {write_mb:.2f} MB/s Write")
         if v_type == 'io2':
             target_iops = max(4000, int(peak_iops * 1.4))
@@ -426,7 +436,7 @@ def save_markdown_report(results, profile_name, total_monthly_savings_all, notes
                 f.write(f"- ⚠️ **Status**: `COLLECTION ERROR ({r.get('error_msg', 'Instance in invalid state or SSM unavailable')})`\n\n")
                 continue
             f.write(f"- **EC2 Type**: `{r.get('current_type')}` ➡️ **Proposed**: `{r.get('recommended_type')}`\n")
-            f.write(f"- **CPU Metrics**: 5-Min Peak (3d): {r.get('cpu_5min_peak_max', 0.0)}% | 30d Max: {r.get('cpu_30d_max', 0.0)}% | Year-End Peak 2025: {r.get('cpu_peak_max', 0.0)}%\n")
+            f.write(f"- **CPU Metrics**: 5-Min Peak (3d): {r.get('cpu_5min_peak_max', 0.0)}% | Window Max: {r.get('cpu_30d_max', 0.0)}%\n")
             f.write(f"- **Downsize Projection**: Projected Max CPU: {r.get('projected_cpu_max', 0.0)}% | Free Headroom: **{r.get('intel_headroom_left', 0.0)}%**\n")
             
             db = r.get('db_internal')
@@ -465,18 +475,27 @@ def run_master_assessment(
     cloudwatch = session.client('cloudwatch')
     ssm = session.client('ssm') if use_ssm else None
 
+    # Senior SRE Fix: Flexible Date Parsing Logic
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
     if start_date and end_date:
         start_time_custom = datetime.datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
         end_time_custom = datetime.datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=datetime.timezone.utc)
+    elif start_date and not end_date:
+        start_time_custom = datetime.datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+        end_time_custom = now_utc
+    elif end_date and not start_date:
+        end_time_custom = datetime.datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=datetime.timezone.utc)
+        start_time_custom = end_time_custom - datetime.timedelta(days=days)
     else:
-        end_time_custom = datetime.datetime.now(datetime.timezone.utc)
+        end_time_custom = now_utc
         start_time_custom = end_time_custom - datetime.timedelta(days=days)
 
-    start_peak = datetime.datetime(2025, 11, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
-    end_peak = datetime.datetime(2025, 12, 31, 23, 59, 59, tzinfo=datetime.timezone.utc)
+    # Senior SRE Fix: Anchor 3-day fine window to end_time_custom
+    end_fine_3d = end_time_custom
+    start_fine_3d = end_fine_3d - datetime.timedelta(days=3)
 
-    start_fine_3d = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)
-    end_fine_3d = datetime.datetime.now(datetime.timezone.utc)
+    print(f"📅 Evaluation Window: {start_time_custom.strftime('%Y-%m-%d %H:%M:%S UTC')} ➡️ {end_time_custom.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"🔍 High-Res Fine Window (5-min): {start_fine_3d.strftime('%Y-%m-%d %H:%M:%S UTC')} ➡️ {end_fine_3d.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
     inventory = []
 
@@ -487,17 +506,23 @@ def run_master_assessment(
     else:
         ec2_filters = [{'Name': 'instance-state-name', 'Values': ['running']}, {'Name': 'tag:Name', 'Values': ['*prod-sql*']}]
 
-    resp = ec2.describe_instances(Filters=ec2_filters)
-    for r in resp['Reservations']:
-        for inst in r['Instances']:
-            inst_tags = {t['Key']: t['Value'] for t in inst.get('Tags', [])}
-            cluster_val = inst_tags.get('mc:service', inst_tags.get('Cluster', inst_tags.get('Name', '').split('0')[0]))
-            inventory.append({
-                'instance_id': inst['InstanceId'],
-                'name': inst_tags.get('Name', inst['InstanceId']),
-                'instance_type': inst['InstanceType'],
-                'cluster': cluster_val
-            })
+    # Senior SRE Fix: EC2 Paginator for complete fleet discovery without limits
+    try:
+        paginator = ec2.get_paginator('describe_instances')
+        page_iterator = paginator.paginate(Filters=ec2_filters)
+        for page in page_iterator:
+            for r in page.get('Reservations', []):
+                for inst in r.get('Instances', []):
+                    inst_tags = {t['Key']: t['Value'] for t in inst.get('Tags', [])}
+                    cluster_val = inst_tags.get('mc:service', inst_tags.get('Cluster', inst_tags.get('Name', '').split('0')[0]))
+                    inventory.append({
+                        'instance_id': inst['InstanceId'],
+                        'name': inst_tags.get('Name', inst['InstanceId']),
+                        'instance_type': inst['InstanceType'],
+                        'cluster': cluster_val
+                    })
+    except Exception as e:
+        print(f"⚠️ Error describing EC2 instances: {e}")
 
     if not inventory and os.path.exists(os.path.join(BASE_DIR, "cluster_inventory.json")):
         with open(os.path.join(BASE_DIR, "cluster_inventory.json"), 'r') as f:
@@ -532,11 +557,14 @@ def run_master_assessment(
         curr_type = node['instance_type']
 
         try:
+            # Senior SRE Guardrail: Verify CloudWatch Metric API success
             cpu_recent = get_metric_stats(cloudwatch, 'AWS/EC2', 'CPUUtilization', [{'Name': 'InstanceId', 'Value': inst_id}], start_time_custom, end_time_custom)
-            cpu_peak = get_metric_stats(cloudwatch, 'AWS/EC2', 'CPUUtilization', [{'Name': 'InstanceId', 'Value': inst_id}], start_peak, end_peak)
             cpu_5min_fine = get_metric_stats(cloudwatch, 'AWS/EC2', 'CPUUtilization', [{'Name': 'InstanceId', 'Value': inst_id}], start_fine_3d, end_fine_3d, force_fine_period=True)
 
-            highest_cpu_max = max(cpu_recent['max'], cpu_peak['max'], cpu_5min_fine['max'])
+            if not cpu_recent.get('success') or not cpu_5min_fine.get('success'):
+                raise RuntimeError(f"CloudWatch API failure fetching CPUUtilization for {inst_id}")
+
+            highest_cpu_max = max(cpu_recent['max'], cpu_5min_fine['max'])
 
             db_internal = None
             if use_ssm:
@@ -563,13 +591,16 @@ def run_master_assessment(
                     attachments = v.get('Attachments', [])
                     dev_name = attachments[0].get('Device', 'N/A') if attachments else 'N/A'
 
-                    ebs_peak_stats = get_ebs_io_stats(cloudwatch, v_id, start_peak, end_peak)
                     ebs_30d_stats = get_ebs_io_stats(cloudwatch, v_id, start_time_custom, end_time_custom)
+                    ebs_fine_stats = get_ebs_io_stats(cloudwatch, v_id, start_fine_3d, end_fine_3d, period=300)
 
-                    peak_iops = max(ebs_peak_stats['peak_iops'], ebs_30d_stats['peak_iops'])
-                    p95_iops = max(ebs_peak_stats['p95_iops'], ebs_30d_stats['p95_iops'])
-                    peak_read_mb = max(ebs_peak_stats['read_mb'], ebs_30d_stats['read_mb'])
-                    peak_write_mb = max(ebs_peak_stats['write_mb'], ebs_30d_stats['write_mb'])
+                    if not ebs_30d_stats.get('success') or not ebs_fine_stats.get('success'):
+                        print(f"  ⚠️ Warning: CloudWatch EBS metrics failed for volume {v_id}, preserving conservative fallback.")
+
+                    peak_iops = max(ebs_30d_stats['peak_iops'], ebs_fine_stats['peak_iops'])
+                    p95_iops = max(ebs_30d_stats['p95_iops'], ebs_fine_stats['p95_iops'])
+                    peak_read_mb = max(ebs_30d_stats['read_mb'], ebs_fine_stats['read_mb'])
+                    peak_write_mb = max(ebs_30d_stats['write_mb'], ebs_fine_stats['write_mb'])
 
                     v_savings = 0.0
                     if v_type == 'io2':
@@ -593,34 +624,38 @@ def run_master_assessment(
                         'peak_write_mb': round(peak_write_mb, 2),
                         'monthly_ebs_savings': round(v_savings, 2)
                     })
-            except Exception:
-                pass
+            except Exception as e_vol:
+                print(f"  ⚠️ Error inspecting EBS volumes for {inst_id}: {e_vol}")
 
             proj_downsized_cpu_max = highest_cpu_max * 2.0
-            headroom = 100.0 - proj_downsized_cpu_max
+            headroom = max(0.0, 100.0 - proj_downsized_cpu_max)
 
             ec2_savings = 0.0
             rec_ec2_type = f"Keep {curr_type} (Intel)"
 
+            # Senior SRE Guardrail: Strict Sizing Criteria & Safe Family Selection
             if proj_downsized_cpu_max <= 50.0 and highest_cpu_max <= 25.0:
-                family, size = curr_type.split('.')[0], curr_type.split('.')[1]
-                intel_fam = "r8i" if "r" in family else "m8i"
+                parts = curr_type.split('.')
+                family_part, size_part = parts[0], parts[1]
+                intel_fam = "r8i" if family_part.startswith("r") else "m8i"
                 
-                if "16xlarge" in size:
+                if "16xlarge" in size_part:
                     smaller = "8xlarge"
-                elif "8xlarge" in size:
+                elif "8xlarge" in size_part:
                     smaller = "4xlarge"
-                elif "4xlarge" in size:
+                elif "4xlarge" in size_part:
                     smaller = "2xlarge"
-                elif "2xlarge" in size:
+                elif "2xlarge" in size_part:
                     smaller = "xlarge"
                 else:
-                    smaller = size
+                    smaller = size_part
                 
-                rec_ec2_type = f"{intel_fam}.{smaller}"
-                curr_h = PRICES_EC2_HOURLY.get(curr_type, 4.0)
-                new_h = PRICES_EC2_HOURLY.get(rec_ec2_type, curr_h / 2.0)
-                ec2_savings = (curr_h - new_h) * 730
+                proposed_candidate = f"{intel_fam}.{smaller}"
+                if proposed_candidate != curr_type:
+                    rec_ec2_type = proposed_candidate
+                    curr_h = PRICES_EC2_HOURLY.get(curr_type, 4.0)
+                    new_h = PRICES_EC2_HOURLY.get(rec_ec2_type, curr_h / 2.0)
+                    ec2_savings = (curr_h - new_h) * 730
 
             total_node_savings = node_ebs_savings + ec2_savings
             total_monthly_savings_all += total_node_savings
@@ -637,7 +672,7 @@ def run_master_assessment(
                 'cpu_30d_p95': round(cpu_recent['p95'], 2),
                 'cpu_30d_max': round(cpu_recent['max'], 2),
                 'cpu_5min_peak_max': round(cpu_5min_fine['max'], 2),
-                'cpu_peak_max': round(cpu_peak['max'], 2),
+                'cpu_peak_max': 0.0,
                 'projected_cpu_max': round(proj_downsized_cpu_max, 2),
                 'intel_headroom_left': round(headroom, 2),
                 'ebs_monthly_savings': round(node_ebs_savings, 2),
@@ -677,7 +712,7 @@ def run_master_assessment(
     csv_file = os.path.join(BASE_DIR, "metricas_consolidadas_30instancias.csv")
     with open(csv_file, 'w', newline='') as f:
         w = csv.writer(f)
-        w.writerow(["Instance Name", "Instance ID", "Current Type", "Intel Recommendation", "Status", "Absolute Peak CPU %", "30d Max CPU %", "5min Peak CPU %", "Year-End Peak CPU %", "Projected CPU %", "Free Intel Headroom %", "Data Device", "Size GB", "Provisioned IOPS", "Peak Used IOPS", "EBS Savings ($/mo)", "EC2 Savings ($/mo)", "Total Monthly Savings ($/mo)", "Total Annual Savings ($/yr)"])
+        w.writerow(["Instance Name", "Instance ID", "Current Type", "Intel Recommendation", "Status", "Absolute Peak CPU %", "Max CPU %", "5min Peak CPU %", "Projected CPU %", "Free Intel Headroom %", "Data Device", "Size GB", "Provisioned IOPS", "Peak Used IOPS", "EBS Savings ($/mo)", "EC2 Savings ($/mo)", "Total Monthly Savings ($/mo)", "Total Annual Savings ($/yr)"])
         results.sort(key=lambda x: x.get('name', ''))
         for r in results:
             v_dev = r['volumes'][0]['device'] if r.get('volumes') else "N/A"
@@ -687,7 +722,7 @@ def run_master_assessment(
 
             w.writerow([
                 r.get('name'), r.get('instance_id'), r.get('current_type'), r.get('recommended_type'),
-                r.get('status', 'OK'), r.get('highest_cpu_max', 0.0), r.get('cpu_30d_max', 0.0), r.get('cpu_5min_peak_max', 0.0), r.get('cpu_peak_max', 0.0), r.get('projected_cpu_max', 0.0), r.get('intel_headroom_left', 0.0),
+                r.get('status', 'OK'), r.get('highest_cpu_max', 0.0), r.get('cpu_30d_max', 0.0), r.get('cpu_5min_peak_max', 0.0), r.get('projected_cpu_max', 0.0), r.get('intel_headroom_left', 0.0),
                 v_dev, v_size, v_prov, v_peak,
                 r.get('ebs_monthly_savings', 0.0), r.get('ec2_monthly_savings', 0.0), r.get('total_monthly_savings', 0.0), round(r.get('total_monthly_savings', 0.0)*12, 2)
             ])
@@ -698,9 +733,9 @@ if __name__ == "__main__":
     parser.add_argument("--region", default="us-west-2", help="AWS Region")
     parser.add_argument("--instance", default=None, help="Specific Instance Name/ID (e.g., prod-sql-secureinventory002)")
     parser.add_argument("--tag", action="append", default=None, help="AWS Tag Filter (e.g., mc:service=secureinventory or JSON)")
-    parser.add_argument("--days", type=int, default=30, help="Recent days to query")
-    parser.add_argument("--start-date", "--start-data", dest="start_date", default=None, help="Start Date (YYYY-MM-DD)")
-    parser.add_argument("--end-date", "--end-data", dest="end_date", default=None, help="Start Date (YYYY-MM-DD)")
+    parser.add_argument("--days", type=int, default=30, help="Recent days to query (if start/end dates are not provided)")
+    parser.add_argument("--start-date", "--start-data", dest="start_date", default=None, help="Start Date (YYYY-MM-DD). Defaults to end-date minus --days if omitted.")
+    parser.add_argument("--end-date", "--end-data", dest="end_date", default=None, help="End Date (YYYY-MM-DD). Defaults to today if omitted.")
     parser.add_argument("--use-ssm", action="store_true", help="Enable AWS SSM to query MariaDB internally")
     parser.add_argument("--output-dir", default=DEFAULT_NOTES_DIR, help="Directory to save timestamped Markdown report")
     args = parser.parse_args()

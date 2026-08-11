@@ -8,11 +8,11 @@ Repository folder dedicated to scripts, automation, capacity planning, and cloud
 
 | Project Folder | Description | Status |
 | :--- | :--- | :--- |
-| 🛠️ [`mariadb-rightsizing/`](file:///Users/jaci.turazzi/Documents/Miniclip/Bitbucket-Projects/jaciturazzi/antigravity/mariadb-rightsizing/) | AWS MariaDB Cluster Rightsizing, Capacity Planning & Storage Cost Optimization | 🟢 Active / Production Ready |
+| 🛠️ [`mariadb-rightsizing/`](file:///Users/jaci.turazzi/Documents/Miniclip/Bitbucket-Projects/jaciturazzi/antigravity/mariadb-rightsizing/README.md) | AWS MariaDB Cluster Rightsizing, Capacity Planning & Storage Cost Optimization | 🟢 Active / Production Ready |
 
 ---
 
-## 📌 Environment Setup
+## 📌 Environment Setup & AWS Prerequisites
 
 Ensure you have your AWS CLI profile configured:
 ```bash
