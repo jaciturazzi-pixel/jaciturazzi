@@ -1,0 +1,139 @@
+# =============================================================================
+# mcplanner — Configuration Template
+# =============================================================================
+# Copy this file to config.yaml and fill in your PMM credentials.
+# Sensitive values support env-var substitution: ${PMM_PASSWORD}
+# =============================================================================
+
+pmm:
+  base_url: "https://pmm-server.us-west-2.pool.minicliptech.com"
+  auth_method: "basic"
+  username: "admin"
+  password: "${PMM_PASSWORD}"
+  verify_ssl: false  # Set to false for self-signed certificates (recommended)
+  timeout_seconds: 30
+
+aws:
+  profile: "miniclippool-databases"
+  region: "us-west-2"
+
+disk:
+  data_device: "nvme4n1"            # NVMe on Nitro instances. Use "xvdh" for older Xen instances.
+  data_mountpoint: "/mnt/storage"   # Mount point of the MariaDB data directory
+
+# ---------------------------------------------------------------------------
+# Node inventory
+# ---------------------------------------------------------------------------
+# Each node must have:
+#   - label:           Human-readable name (matches PMM node_name)
+#   - pmm_node_name:   Label in Prometheus (defaults to label)
+#   - service_name:    mysqld_exporter service label (defaults to {label}-mysql)
+#   - aws_instance_id: EC2 Instance ID
+#   - cluster:         Cluster grouping
+#   - role:            writer | reader | snapshot
+# ---------------------------------------------------------------------------
+
+nodes:
+  # --- Cluster: prod-sql-awards ---
+  - label: "prod-sql-awards010"
+    aws_instance_id: "i-07af44ef17621173c"
+    cluster: "prod-sql-awards"
+    role: "writer"
+
+  - label: "prod-sql-awards011"
+    aws_instance_id: "i-0b27baa7b2e84d948"
+    cluster: "prod-sql-awards"
+    role: "reader"
+
+  # --- Cluster: prod-sql-qfpsystem ---
+  - label: "prod-sql-qfpsystem010"
+    aws_instance_id: "i-09c9a04f362875256"
+    cluster: "prod-sql-qfpsystem"
+    role: "writer"
+
+  - label: "prod-sql-qfpsystem011"
+    aws_instance_id: "i-008b4544f2d4ef3f5"
+    cluster: "prod-sql-qfpsystem"
+    role: "reader"
+
+  - label: "prod-sql-qfpsystem012"
+    aws_instance_id: "i-02bf427581a221ce4"
+    cluster: "prod-sql-qfpsystem"
+    role: "snapshot"
+
+  - label: "prod-sql-qfpsystem013"
+    aws_instance_id: "i-04da45984c517d18b"
+    cluster: "prod-sql-qfpsystem"
+    role: "reader"
+
+  - label: "prod-sql-qfpsystem014"
+    aws_instance_id: "i-0c029d9929dd93e88"
+    cluster: "prod-sql-qfpsystem"
+    role: "reader"
+
+  # Add remaining clusters here:
+  # prod-sql-community, prod-sql-qfp, prod-sql-secure, prod-sql-secureinventory
+  # ...
+
+# ---------------------------------------------------------------------------
+# Analysis thresholds
+# ---------------------------------------------------------------------------
+
+thresholds:
+  cpu:
+    per_core_saturation_pct: 75
+    projected_max_after_downsize: 50
+    context_switches_per_sec_warn: 50000
+    skewness_warn: 1.5
+
+  memory:
+    min_free_pct_after_session_overhead: 15
+    buffer_pool_hit_ratio_min: 99.5
+    lru_freed_per_sec_warn: 1000
+    oom_risk_score_veto: 80.0
+
+  replication:
+    sbm_micro_lag_threshold_sec: 5
+    sbm_veto_percentile: 99
+    micro_lag_min_duration_sec: 30
+
+  disk:
+    write_latency_p99_ms_io2_threshold: 2.0
+    gp3_max_iops: 16000
+    gp3_max_throughput_mbps: 1000
+    iops_safety_factor: 1.4
+    iops_floor: 3000
+
+  runway:
+    months: 6
+    growth_factor: 1.10
+    occupancy_alert_pct: 75
+    occupancy_critical_pct: 85
+    free_space_downsize_gb: 300
+
+# ---------------------------------------------------------------------------
+# Pricing (On-Demand, us-west-2)
+# ---------------------------------------------------------------------------
+
+pricing:
+  ec2_hourly:
+    prices:
+      r8i.16xlarge: 4.170
+      r8i.8xlarge: 2.085
+      r8i.4xlarge: 1.0425
+      r8i.2xlarge: 0.52125
+      r8i.xlarge: 0.26063
+      m8i.4xlarge: 0.768
+      m8i.2xlarge: 0.384
+      m8i.xlarge: 0.192
+
+  ebs:
+    io2_per_gb: 0.125
+    io2_per_iops: 0.065
+    gp3_per_gb: 0.08
+    gp3_base_iops: 3000
+    gp3_per_extra_iops: 0.005
+    gp3_base_throughput_mbps: 125
+    gp3_per_extra_throughput_mbps: 0.04
+
+  hours_per_month: 730

@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import datetime
+from collections import defaultdict
+from pathlib import Path
+
+from mcplanner.models import RightsizingRecommendation, NodeRole
+
+def _val(x) -> str:
+    if x is None:
+        return ""
+    if hasattr(x, "value"):
+        return str(x.value)
+    return str(x)
+
+def _status_emoji(status: str) -> str:
+    if status == "OK": return "🟢 OK"
+    if status == "VETOED": return "🟡 VETOED"
+    return "🔴 ERROR"
+
+def generate_markdown_report(recommendations: list[RightsizingRecommendation], output_path: str) -> str:
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    tot_monthly = sum(r.total_monthly_savings_usd for r in recommendations)
+    tot_annual = sum(r.total_annual_savings_usd for r in recommendations)
+    vetoed_count = sum(1 for r in recommendations if r.status == "VETOED")
+    ok_count = sum(1 for r in recommendations if r.status == "OK")
+    
+    lines = [
+        f"# MariaDB Capacity & Rightsizing Report",
+        f"**Generated:** {now}",
+        "",
+        "## Executive Financial Summary",
+        f"- **Total Monthly Savings:** ${tot_monthly:,.2f}",
+        f"- **Total Annual Savings:** ${tot_annual:,.2f}",
+        f"- **Instances Analyzed:** {len(recommendations)}",
+        f"- **Actionable (OK):** {ok_count}",
+        f"- **Vetoed / Requires Attention:** {vetoed_count}",
+        "",
+        "## Consolidated Summary",
+        "",
+        "| Instance | Cluster | Current EC2 | Recommended | Peak CPU% | Hottest Core% | Proj CPU% | RAM GB | OOM Risk | SBM P99 | Disk Type | Peak IOPS | Latency P99ms | Runway 6m% | Vetoes | Status | Total $/mo |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+
+    recs_sorted = sorted(recommendations, key=lambda x: (x.cluster, x.node_label))
+    
+    for r in recs_sorted:
+        cpu_max = f"{r.cpu.aggregate_max_pct:.1f}" if r.cpu else "-"
+        core_max = f"{r.cpu.hottest_core_max_pct:.1f}" if r.cpu else "-"
+        proj_cpu = f"{r.cpu.projected_aggregate_max_pct:.1f}" if r.cpu else "-"
+        ram = f"{r.memory.total_ram_gb:.1f}" if r.memory else "-"
+        oom = f"{r.memory.oom_risk_score:.1f}" if r.memory else "-"
+        sbm = f"{r.replication.sbm_p99:.1f}" if r.replication and r.replication.is_replica else "-"
+        disk_type = r.disk.volume_type if r.disk else "-"
+        peak_iops = f"{r.disk.total_iops_peak:.0f}" if r.disk else "-"
+        lat_p99 = f"{r.disk.write_latency_ms.p99:.2f}" if r.disk else "-"
+        runway = f"{r.runway.projected_occupancy_6m_pct:.1f}%" if r.runway else "-"
+        vetoes = str(len(r.all_vetoes)) if r.all_vetoes else "0"
+        
+        lines.append(f"| {r.node_label} | {r.cluster} | {r.current_ec2_type} | {r.recommended_ec2_type} | {cpu_max} | {core_max} | {proj_cpu} | {ram} | {oom} | {sbm} | {disk_type} | {peak_iops} | {lat_p99} | {runway} | {vetoes} | {_status_emoji(r.status)} | ${r.total_monthly_savings_usd:,.2f} |")
+
+    lines.append("")
+    
+    # Per-cluster sections
+    clusters = defaultdict(list)
+    for r in recs_sorted:
+        clusters[r.cluster].append(r)
+        
+    for cluster_name, nodes in clusters.items():
+        lines.append(f"## Cluster: {cluster_name}")
+        lines.append("")
+        
+        # Topology
+        lines.append("### Topology")
+        lines.append("```mermaid")
+        lines.append("graph TD")
+        
+        writers = [n for n in nodes if _val(n.role) == "writer"]
+        readers = [n for n in nodes if _val(n.role) == "reader"]
+        
+        for w in writers:
+            lines.append(f'  {w.node_label}["{w.node_label}\\n(Writer)\\n{w.current_ec2_type} -> {w.recommended_ec2_type}"]')
+        for r in readers:
+            lines.append(f'  {r.node_label}["{r.node_label}\\n(Reader)\\n{r.current_ec2_type} -> {r.recommended_ec2_type}"]')
+            for w in writers:
+                lines.append(f'  {w.node_label} --> {r.node_label}')
+                
+        lines.append("```")
+        lines.append("")
+        
+        # Node details
+        lines.append("### Nodes")
+        for n in nodes:
+            lines.append(f"#### {n.node_label} ({_status_emoji(n.status)})")
+            lines.append(f"- **Role:** {_val(n.role)}")
+            lines.append(f"- **Instance ID:** {n.aws_instance_id}")
+            lines.append(f"- **Rightsizing:** `{n.current_ec2_type}` → `{n.recommended_ec2_type}`")
+            lines.append(f"- **Savings:** ${n.total_monthly_savings_usd:,.2f} / month")
+            
+            if n.all_vetoes:
+                lines.append("- **Vetoes:**")
+                for v in n.all_vetoes:
+                    v_str = _val(v)
+                    lines.append(f"  - 🔴 **{v_str}:** {n.all_veto_details.get(v_str, n.all_veto_details.get(v, ''))}")
+            
+            lines.append("")
+            
+    lines.append("## Methodology")
+    lines.append("This report was generated by analyzing Prometheus metrics (CPU, Memory, Disk I/O, Replication) and AWS metadata. ")
+    lines.append("Rightsizing recommendations evaluate peak historical usage against projected capacity on smaller instance types.")
+    lines.append("Vetoes are applied when downsizing would breach saturation thresholds (e.g., per-core CPU, memory session ceilings, or replication lag).")
+    
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\\n".join(lines), encoding="utf-8")
+    
+    return str(out.absolute())

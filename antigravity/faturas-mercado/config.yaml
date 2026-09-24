@@ -1,0 +1,36 @@
+# Configuração do Sistema de Faturas
+
+gmail:
+  queries:
+    - store: "Continente"
+      query: 'from:noreply@cartaocontinente.pt subject:"Cartão Continente – Envio de Fatura Eletrónica" has:attachment'
+    - store: "Pingo Doce"
+      query: 'from:facturaelectronica@pingodoce.pt subject:"Fatura Eletrónica Pingo Doce" has:attachment'
+
+categories:
+  - Carnes & Aves
+  - Peixaria & Marisco
+  - Frutas & Legumes
+  - Queijos
+  - Iogurtes
+  - Outros Laticínios (Leite, Manteiga)
+  - Cervejas
+  - Vinhos
+  - Refrigerantes & Sumos
+  - Energéticos
+  - Sementes & Frutos Secos
+  - Doces & Snacks
+  - Mercearia (Massa, Arroz, Conservas)
+  - Padaria & Pastelaria
+  - Fraldas & Bebé
+  - Higiene Pessoal
+  - Limpeza da Casa
+  - Congelados
+  - Livraria & Brinquedos
+  - Cashback / Depósitos
+  - Outros
+
+paths:
+  invoices_dir: "data/invoices"
+  reports_dir: "data/reports"
+  db_path: "data/faturas.db"

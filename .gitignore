@@ -3,7 +3,16 @@ venv/
 .venv*
 **/.venv*
 **/venv/
+/antigravity/faturas-mercado/data/invoices/*
+
 
 # Generated exports
 *.csv
 *.log
+antigravity/mariadb-capacity-planner/reports/*
+antigravity/faturas-mercado/data/reports/*
+
+# Secrets — never commit
+antigravity/faturas-mercado/.env
+antigravity/faturas-mercado/credentials.json
+antigravity/faturas-mercado/token.json

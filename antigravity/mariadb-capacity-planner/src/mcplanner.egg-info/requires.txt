@@ -1,0 +1,12 @@
+click>=8.1
+requests>=2.31
+boto3>=1.34
+pyyaml>=6.0
+rich>=13.7
+numpy>=1.26
+pydantic>=2.5
+
+[dev]
+pytest>=8.0
+pytest-mock
+responses

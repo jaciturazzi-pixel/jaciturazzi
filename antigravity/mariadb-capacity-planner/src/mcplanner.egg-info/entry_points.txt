@@ -1,0 +1,2 @@
+[console_scripts]
+mcplanner = mcplanner.cli:main
